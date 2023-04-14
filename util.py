@@ -202,11 +202,11 @@ def get_crop_parameter_by_mediapipe(img, padding=[200, 200, 200, 200]):
         for keypoint in keypoints:
             print(keypoint.x * img.shape[1], keypoint.y * img.shape[0])
 
-        import matplotlib.pyplot as plt
+        # import matplotlib.pyplot as plt
         # cv2.circle(img, (lm_eye_left[0], lm_eye_left[1]), 10, (0, 255, 0))
         # cv2.circle(img, (lm_eye_right[0], lm_eye_right[1]), 10, (0, 0, 255))
-        plt.imshow(img)
-        plt.show()
+        # plt.imshow(img)
+        # plt.show()
 
         scale = 64. / (lm_eye_right[0] - lm_eye_left[0])
         center = scale * 0.5 * (lm_eye_left + lm_eye_right)
@@ -279,3 +279,12 @@ def blend_models(G_low, G_high, weight=[1]*7+[0]*11):
         
     return state_dict
 
+# for flask server
+def decode_received_image_data(img_data):
+  data = np.frombuffer(img_data, np.uint8)
+  img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+  return img
+
+def encode_image_to_bytes(fmt, image):
+  _, encoded_image = cv2.imencode(fmt, np.asarray(image))
+  return encoded_image.tobytes()
