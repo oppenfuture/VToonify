@@ -11,7 +11,8 @@ from tqdm import tqdm
 from model.vtoonify import VToonify
 from model.bisenet.model import BiSeNet
 from model.encoder.align_all_parallel import align_face
-from util import save_image, load_image, visualize, load_psp_standalone, get_video_crop_parameter, tensor2cv2
+from util import save_image, load_image, visualize, load_psp_standalone, get_video_crop_parameter, tensor2cv2, get_crop_parameter_by_mediapipe, creat_weight_kernel
+import matplotlib.pyplot as plt
 
 
 class TestOptions():
@@ -189,11 +190,14 @@ if __name__ == "__main__":
 
         frame = cv2.imread(filename)
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        origin = frame.copy() / 255.
+        print(frame.shape, origin.shape)
 
         # We detect the face in the image, and resize the image so that the eye distance is 64 pixels.
         # Centered on the eyes, we crop the image to almost 400x400 (based on args.padding).
         if args.scale_image:
-            paras = get_video_crop_parameter(frame, landmarkpredictor, args.padding)
+            # paras = get_video_crop_parameter(frame, landmarkpredictor, args.padding)
+            paras = get_crop_parameter_by_mediapipe(frame, args.padding)
             if paras is not None:
                 h,w,top,bottom,left,right,scale = paras
                 H, W = int(bottom-top), int(right-left)
@@ -205,8 +209,13 @@ if __name__ == "__main__":
                 frame = cv2.resize(frame, (w, h))[top:bottom, left:right]
 
         with torch.no_grad():
-            I = align_face(frame, landmarkpredictor)
-            I = transform(I).unsqueeze(dim=0).to(device)
+            # h, w, _ = frame.shape
+            # frame = cv2.resize(frame, (w // 8 * 8, h // 8 * 8))
+            
+            # I = align_face(frame, landmarkpredictor)
+            # I = transform(I).unsqueeze(dim=0).to(device)
+            
+            I = transform(frame).unsqueeze(dim=0).to(device)
             s_w = pspencoder(I)
             s_w = vtoonify.zplus2wplus(s_w)
             if vtoonify.backbone == 'dualstylegan':
@@ -216,17 +225,51 @@ if __name__ == "__main__":
                     s_w[:,:7] = exstyle[:,:7]
 
             x = transform(frame).unsqueeze(dim=0).to(device)
+            print('x shape ', x.shape)
             # parsing network works best on 512x512 images, so we predict parsing maps on upsmapled frames
             # followed by downsampling the parsing maps
             x_p = F.interpolate(parsingpredictor(2*(F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)))[0], 
                                 scale_factor=0.5, recompute_scale_factor=False).detach()
+            print('x_p shape ', x_p.shape)
+            torch.cuda.empty_cache()
             # we give parsing maps lower weight (1/16)
             inputs = torch.cat((x, x_p/16.), dim=1)
             # d_s has no effect when backbone is toonify
+            print(inputs.shape, s_w.shape)
             y_tilde = vtoonify(inputs, s_w.repeat(inputs.size(0), 1, 1), d_s = args.style_degree)        
             y_tilde = torch.clamp(y_tilde, -1, 1)
 
         cv2.imwrite(cropname, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
         save_image(y_tilde[0].cpu(), savename)
+
+        if args.scale_image:
+            if paras is not None:
+                H, W, _ = origin.shape
+                h,w,top,bottom,left,right,scale = paras
+                origin = cv2.resize(origin, (w, h))
+                print(origin.max())
+                output = (y_tilde[0].detach().cpu().numpy().transpose(1, 2, 0) + 1) * 0.5
+                output = cv2.resize(output, (right - left, bottom - top))
+                print(output.shape)
+                gauss_kernel = (creat_weight_kernel((right - left, bottom - top)))[..., np.newaxis]
+                # gauss_kernel = gauss_kernel / gauss_kernel.max()
+                plt.imshow(gauss_kernel)
+                plt.show()
+
+                origin[top:bottom, left:right] = output * gauss_kernel + origin[top:bottom, left:right] * (1 - gauss_kernel)
+                origin = cv2.resize(origin, (W, H))
+                origin = (origin * 255).astype(np.uint8)
+                plt.imshow(origin)
+                plt.show()
+
+                # gaussian3 = cv2.GaussianBlur(origin, (3, 3), 1)
+                # plt.imshow(gaussian3)
+                # plt.show()
+
+                # gaussian5 = cv2.GaussianBlur(origin, (5, 5), 1)
+                # plt.imshow(gaussian5)
+                # plt.show()
+
+
         
     print('Transfer style successfully!')
