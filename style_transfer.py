@@ -13,7 +13,9 @@ from model.bisenet.model import BiSeNet
 from model.encoder.align_all_parallel import align_face
 from util import save_image, load_image, visualize, load_psp_standalone, get_video_crop_parameter, tensor2cv2, get_crop_parameter_by_mediapipe, creat_weight_kernel
 import matplotlib.pyplot as plt
-
+from typing import Union, Optional, List, Dict
+from model.encoder.encoders.psp_encoders import GradualStyleEncoder
+import time
 
 class TestOptions():
     def __init__(self):
@@ -46,6 +48,132 @@ class TestOptions():
             print('%s: %s' % (str(name), str(value)))
         return self.opt
     
+def create_image_style_transfer_cartoon299_models(device: str = 'cuda', ):
+    ckpt = './checkpoint/vtoonify_d_cartoon/vtoonify_s299_d0.5.pt'
+    vtoonify = VToonify(backbone = 'dualstylegan')
+    vtoonify.load_state_dict(torch.load(ckpt, map_location=lambda storage, loc: storage)['g_ema'])
+    vtoonify.to(device)
+
+    parsingpredictor = BiSeNet(n_classes=19)
+    parsingpredictor.load_state_dict(torch.load('./checkpoint/faceparsing.pth', map_location=lambda storage, loc: storage))
+    parsingpredictor.to(device).eval()
+
+    pspencoder = load_psp_standalone('./checkpoint/encoder.pt', device)    
+
+    exstyle_path = os.path.join(os.path.dirname(ckpt), 'exstyle_code.npy')
+    exstyles = np.load(exstyle_path, allow_pickle='TRUE').item()
+    stylename = list(exstyles.keys())[299]
+    exstyle = torch.tensor(exstyles[stylename]).to(device)
+    with torch.no_grad():  
+        exstyle = vtoonify.zplus2wplus(exstyle)
+
+    return vtoonify, parsingpredictor, pspencoder, exstyle
+
+def image_style_transfer_cartoon299(
+    frame: np.ndarray,
+    device: str = 'cuda',
+    padding: Union[int, List[int]] = [120, 120, 120, 120], 
+    index: int = 0,
+    vtoonify: Optional[VToonify] = None,
+    parsingpredictor: Optional[BiSeNet] = None,
+    pspencoder: Optional[GradualStyleEncoder] = None,
+    exstyle = None,
+):
+    ckpt = './checkpoint/vtoonify_d_cartoon/vtoonify_s299_d0.5.pt'
+    if vtoonify is None:
+        vtoonify = VToonify(backbone = 'dualstylegan')
+        vtoonify.load_state_dict(torch.load(ckpt, map_location=lambda storage, loc: storage)['g_ema'])
+    vtoonify.to(device)
+
+    if parsingpredictor is None:
+        parsingpredictor = BiSeNet(n_classes=19)
+        parsingpredictor.load_state_dict(torch.load('./checkpoint/faceparsing.pth', map_location=lambda storage, loc: storage))
+    parsingpredictor.to(device).eval()
+
+    if pspencoder is None:
+        pspencoder = load_psp_standalone('./checkpoint/encoder.pt', device)    
+
+    if exstyle is None:
+        exstyle_path = os.path.join(os.path.dirname(ckpt), 'exstyle_code.npy')
+        exstyles = np.load(exstyle_path, allow_pickle='TRUE').item()
+        stylename = list(exstyles.keys())[299]
+        exstyle = torch.tensor(exstyles[stylename]).to(device)
+        with torch.no_grad():  
+            exstyle = vtoonify.zplus2wplus(exstyle)
+
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5],std=[0.5,0.5,0.5]),
+        ])
+
+    origin = frame.copy()
+
+    # We detect the face in the image, and resize the image so that the eye distance is 64 pixels.
+    if padding is int:
+        padding = [padding for _ in range(4)]
+    paras = get_crop_parameter_by_mediapipe(frame, padding)
+    if paras is not None:
+        h,w,top,bottom,left,right,scale = paras
+        H, W = int(bottom-top), int(right-left)
+        kernel_1d = np.array([[0.125],[0.375],[0.375],[0.125]])
+        # for HR image, we apply gaussian blur to it to avoid over-sharp stylization results
+        if scale <= 0.75:
+            frame = cv2.sepFilter2D(frame, -1, kernel_1d, kernel_1d)
+        if scale <= 0.375:
+            frame = cv2.sepFilter2D(frame, -1, kernel_1d, kernel_1d)
+        frame = cv2.resize(frame, (w, h))[top:bottom, left:right]
+    else:
+        return None
+
+    with torch.no_grad():
+
+        I = transform(frame).unsqueeze(dim=0).to(device)
+        s_w = pspencoder(I)
+        s_w = vtoonify.zplus2wplus(s_w)
+        if vtoonify.backbone == 'dualstylegan':
+            # if args.color_transfer:
+            #     s_w = exstyle
+            # else:
+            s_w[:,:7] = exstyle[:,:7]
+
+        x = transform(frame).unsqueeze(dim=0).to(device)
+        # parsing network works best on 512x512 images, so we predict parsing maps on upsmapled frames
+        # followed by downsampling the parsing maps
+        x_p = F.interpolate(parsingpredictor(2*(F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)))[0], 
+                            scale_factor=0.5, recompute_scale_factor=False).detach()
+        torch.cuda.empty_cache()
+        # we give parsing maps lower weight (1/16)
+        inputs = torch.cat((x, x_p/16.), dim=1)
+        # d_s has no effect when backbone is toonify
+        y_tilde = vtoonify(inputs, s_w.repeat(inputs.size(0), 1, 1), d_s = 0.5)        
+        y_tilde = torch.clamp(y_tilde, -1, 1)
+
+    # cv2.imwrite(cropname, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    # save_image(y_tilde[0].cpu(), savename)
+
+
+    if paras is not None:
+        H, W, _ = origin.shape
+        h,w,top,bottom,left,right,scale = paras
+
+    if paras is not None:
+        H, W, _ = origin.shape
+        h,w,top,bottom,left,right,scale = paras
+        origin = cv2.resize(origin / 255., (w, h))
+
+        output = (y_tilde[0].detach().cpu().numpy().transpose(1, 2, 0) + 1) * 0.5
+        output = cv2.resize(output, (right - left, bottom - top))
+        
+        weight_kernel = (creat_weight_kernel((right - left, bottom - top)))[..., np.newaxis]
+        origin[top:bottom, left:right] = output * weight_kernel + origin[top:bottom, left:right] * (1 - weight_kernel)
+        origin = cv2.resize(origin, (W, H))
+        origin = (origin * 255).astype(np.uint8)
+
+        cv2.imwrite("/home/zyf/Pictures/test233/{}.jpg".format(time.time()), origin[...,[2,1,0]])
+
+        return origin
+
+    
 if __name__ == "__main__":
 
     parser = TestOptions()
@@ -68,14 +196,14 @@ if __name__ == "__main__":
     parsingpredictor.load_state_dict(torch.load(args.faceparsing_path, map_location=lambda storage, loc: storage))
     parsingpredictor.to(device).eval()
 
-    modelname = './checkpoint/shape_predictor_68_face_landmarks.dat'
-    if not os.path.exists(modelname):
-        import wget, bz2
-        wget.download('http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2', modelname+'.bz2')
-        zipfile = bz2.BZ2File(modelname+'.bz2')
-        data = zipfile.read()
-        open(modelname, 'wb').write(data) 
-    landmarkpredictor = dlib.shape_predictor(modelname)
+    # modelname = './checkpoint/shape_predictor_68_face_landmarks.dat'
+    # if not os.path.exists(modelname):
+    #     import wget, bz2
+    #     wget.download('http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2', modelname+'.bz2')
+    #     zipfile = bz2.BZ2File(modelname+'.bz2')
+    #     data = zipfile.read()
+    #     open(modelname, 'wb').write(data) 
+    # landmarkpredictor = dlib.shape_predictor(modelname)
 
     pspencoder = load_psp_standalone(args.style_encoder_path, device)    
 
@@ -190,8 +318,7 @@ if __name__ == "__main__":
 
         frame = cv2.imread(filename)
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        origin = frame.copy() / 255.
-        print(frame.shape, origin.shape)
+        origin = frame.copy()
 
         # We detect the face in the image, and resize the image so that the eye distance is 64 pixels.
         # Centered on the eyes, we crop the image to almost 400x400 (based on args.padding).
@@ -207,8 +334,11 @@ if __name__ == "__main__":
                 if scale <= 0.375:
                     frame = cv2.sepFilter2D(frame, -1, kernel_1d, kernel_1d)
                 frame = cv2.resize(frame, (w, h))[top:bottom, left:right]
+        
+        print('start inference')
 
         with torch.no_grad():
+            start = time.time()
             # h, w, _ = frame.shape
             # frame = cv2.resize(frame, (w // 8 * 8, h // 8 * 8))
             
@@ -239,6 +369,9 @@ if __name__ == "__main__":
             y_tilde = vtoonify(inputs, s_w.repeat(inputs.size(0), 1, 1), d_s = args.style_degree)        
             y_tilde = torch.clamp(y_tilde, -1, 1)
 
+            end = time.time()
+            print('time = ', end - start)
+
         cv2.imwrite(cropname, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
         save_image(y_tilde[0].cpu(), savename)
 
@@ -246,30 +379,19 @@ if __name__ == "__main__":
             if paras is not None:
                 H, W, _ = origin.shape
                 h,w,top,bottom,left,right,scale = paras
-                origin = cv2.resize(origin, (w, h))
-                print(origin.max())
+                origin_copy = cv2.resize(origin  / 255., (w, h))
                 output = (y_tilde[0].detach().cpu().numpy().transpose(1, 2, 0) + 1) * 0.5
                 output = cv2.resize(output, (right - left, bottom - top))
-                print(output.shape)
-                gauss_kernel = (creat_weight_kernel((right - left, bottom - top)))[..., np.newaxis]
-                # gauss_kernel = gauss_kernel / gauss_kernel.max()
-                plt.imshow(gauss_kernel)
+                weight_kernel = (creat_weight_kernel((right - left, bottom - top)))[..., np.newaxis]
+
+                origin_copy[top:bottom, left:right] = output * weight_kernel + origin_copy[top:bottom, left:right] * (1 - weight_kernel)
+                origin_copy = cv2.resize(origin_copy, (W, H))
+                origin_copy = (origin_copy * 255).astype(np.uint8)
+                plt.imshow(origin_copy)
                 plt.show()
 
-                origin[top:bottom, left:right] = output * gauss_kernel + origin[top:bottom, left:right] * (1 - gauss_kernel)
-                origin = cv2.resize(origin, (W, H))
-                origin = (origin * 255).astype(np.uint8)
-                plt.imshow(origin)
-                plt.show()
+    print('function test')
+    res = image_style_transfer_cartoon299(origin.copy(), device = device, padding = args.padding) #, vtoonify, parsingpredictor, pspencoder, exstyle, device, args.padding)
+    print(res.shape)
 
-                # gaussian3 = cv2.GaussianBlur(origin, (3, 3), 1)
-                # plt.imshow(gaussian3)
-                # plt.show()
-
-                # gaussian5 = cv2.GaussianBlur(origin, (5, 5), 1)
-                # plt.imshow(gaussian5)
-                # plt.show()
-
-
-        
     print('Transfer style successfully!')
