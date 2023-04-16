@@ -194,27 +194,17 @@ def get_crop_parameter_by_mediapipe(img, padding=[200, 200, 200, 200]):
     if results.detections:
         keypoints = results.detections[0].location_data.relative_keypoints
 
-        # TODO: figure out the eye index!!!!!!!!!!!
         lm_eye_left = np.array([keypoints[0].x * img.shape[1], keypoints[0].y * img.shape[0]])
         lm_eye_right = np.array([keypoints[1].x * img.shape[1], keypoints[1].y * img.shape[0]])
-        # print(keypoints, keypoints[0], keypoints[1])
-        print(lm_eye_left, lm_eye_right)
-        for keypoint in keypoints:
-            print(keypoint.x * img.shape[1], keypoint.y * img.shape[0])
-
-        # import matplotlib.pyplot as plt
-        # cv2.circle(img, (lm_eye_left[0], lm_eye_left[1]), 10, (0, 255, 0))
-        # cv2.circle(img, (lm_eye_right[0], lm_eye_right[1]), 10, (0, 0, 255))
-        # plt.imshow(img)
-        # plt.show()
-
+        center_before_scale = 0.5 * (lm_eye_left + lm_eye_right)
+        H, W, _ = img.shape
         scale = 64. / (lm_eye_right[0] - lm_eye_left[0])
-        center = scale * 0.5 * (lm_eye_left + lm_eye_right)
-        h, w = round(img.shape[0] * scale), round(img.shape[1] * scale)
-        left = max(round(center[0] - padding[0]), 0) // 8 * 8
-        right = min(round(center[0] + padding[1]), w) // 8 * 8
-        top = max(round(center[1] - padding[2]), 0) // 8 * 8
-        bottom = min(round(center[1] + padding[3]), h) // 8 * 8
+        left = max(round(center_before_scale[0] - padding[0] // scale), 0)
+        right = min(round(center_before_scale[0] + padding[1] // scale), W)
+        top = max(round(center_before_scale[1] - padding[2] // scale), 0)
+        bottom = min(round(center_before_scale[1] + padding[3] // scale), H)
+        w = int(scale * (right - left) // 8 * 8)
+        h = int(scale * (bottom - top) // 8 * 8)
         return h,w,top,bottom,left,right,scale
     else:
         return None

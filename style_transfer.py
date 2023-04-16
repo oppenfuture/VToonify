@@ -114,14 +114,13 @@ def image_style_transfer_cartoon299(
     paras = get_crop_parameter_by_mediapipe(frame, padding)
     if paras is not None:
         h,w,top,bottom,left,right,scale = paras
-        H, W = int(bottom-top), int(right-left)
         kernel_1d = np.array([[0.125],[0.375],[0.375],[0.125]])
         # for HR image, we apply gaussian blur to it to avoid over-sharp stylization results
         if scale <= 0.75:
             frame = cv2.sepFilter2D(frame, -1, kernel_1d, kernel_1d)
         if scale <= 0.375:
             frame = cv2.sepFilter2D(frame, -1, kernel_1d, kernel_1d)
-        frame = cv2.resize(frame, (w, h))[top:bottom, left:right]
+        frame = cv2.resize(frame[top:bottom, left:right], (w, h))
     else:
         return None
 
@@ -148,28 +147,14 @@ def image_style_transfer_cartoon299(
         y_tilde = vtoonify(inputs, s_w.repeat(inputs.size(0), 1, 1), d_s = 0.5)        
         y_tilde = torch.clamp(y_tilde, -1, 1)
 
-    # cv2.imwrite(cropname, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-    # save_image(y_tilde[0].cpu(), savename)
-
-
     if paras is not None:
-        H, W, _ = origin.shape
         h,w,top,bottom,left,right,scale = paras
-
-    if paras is not None:
-        H, W, _ = origin.shape
-        h,w,top,bottom,left,right,scale = paras
-        origin = cv2.resize(origin / 255., (w, h))
-
+        origin = origin / 255.
         output = (y_tilde[0].detach().cpu().numpy().transpose(1, 2, 0) + 1) * 0.5
         output = cv2.resize(output, (right - left, bottom - top))
-        
         weight_kernel = (creat_weight_kernel((right - left, bottom - top)))[..., np.newaxis]
         origin[top:bottom, left:right] = output * weight_kernel + origin[top:bottom, left:right] * (1 - weight_kernel)
-        origin = cv2.resize(origin, (W, H))
         origin = (origin * 255).astype(np.uint8)
-
-        cv2.imwrite("/home/zyf/Pictures/test233/{}.jpg".format(time.time()), origin[...,[2,1,0]])
 
         return origin
 
@@ -355,17 +340,14 @@ if __name__ == "__main__":
                     s_w[:,:7] = exstyle[:,:7]
 
             x = transform(frame).unsqueeze(dim=0).to(device)
-            print('x shape ', x.shape)
             # parsing network works best on 512x512 images, so we predict parsing maps on upsmapled frames
             # followed by downsampling the parsing maps
             x_p = F.interpolate(parsingpredictor(2*(F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)))[0], 
                                 scale_factor=0.5, recompute_scale_factor=False).detach()
-            print('x_p shape ', x_p.shape)
             torch.cuda.empty_cache()
             # we give parsing maps lower weight (1/16)
             inputs = torch.cat((x, x_p/16.), dim=1)
             # d_s has no effect when backbone is toonify
-            print(inputs.shape, s_w.shape)
             y_tilde = vtoonify(inputs, s_w.repeat(inputs.size(0), 1, 1), d_s = args.style_degree)        
             y_tilde = torch.clamp(y_tilde, -1, 1)
 
