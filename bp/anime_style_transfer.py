@@ -12,11 +12,11 @@ from server_config import config
 
 bp = Blueprint('changeBg', __name__, url_prefix='/changeBg')
 
-ckpt_dir = config.ckpt_dir
-style_id = config.style_id
-device = config.device
+ckpt_dir = config['ckpt_dir']
+style_id = config['style_id']
+device = config['device']
 models = create_image_style_transfer_dualstylegan_models('./checkpoint/{}/vtoonify_s{}_d0.5.pt'.format(ckpt_dir, style_id), style_id, device)
-padding = config.padding
+padding = config['padding']
 
 @bp.route('', methods=('POST', ))
 @cross_origin()
