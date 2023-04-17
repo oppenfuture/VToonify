@@ -48,8 +48,8 @@ class TestOptions():
             print('%s: %s' % (str(name), str(value)))
         return self.opt
     
-def create_image_style_transfer_cartoon299_models(device: str = 'cuda', ):
-    ckpt = './checkpoint/vtoonify_d_cartoon/vtoonify_s299_d0.5.pt'
+def create_image_style_transfer_dualstylegan_models(ckpt = './checkpoint/vtoonify_d_cartoon_test/vtoonify_s100_d0.5.pt', style_id: int = 100, device: str = 'cuda'):
+    print('loading ckpt ', ckpt)
     vtoonify = VToonify(backbone = 'dualstylegan')
     vtoonify.load_state_dict(torch.load(ckpt, map_location=lambda storage, loc: storage)['g_ema'])
     vtoonify.to(device)
@@ -62,25 +62,28 @@ def create_image_style_transfer_cartoon299_models(device: str = 'cuda', ):
 
     exstyle_path = os.path.join(os.path.dirname(ckpt), 'exstyle_code.npy')
     exstyles = np.load(exstyle_path, allow_pickle='TRUE').item()
-    stylename = list(exstyles.keys())[299]
+    stylename = list(exstyles.keys())[style_id]
     exstyle = torch.tensor(exstyles[stylename]).to(device)
     with torch.no_grad():  
         exstyle = vtoonify.zplus2wplus(exstyle)
 
     return vtoonify, parsingpredictor, pspencoder, exstyle
 
-def image_style_transfer_cartoon299(
+def image_style_transfer_d(
     frame: np.ndarray,
+    style_id: int = 299,
     device: str = 'cuda',
     padding: Union[int, List[int]] = [120, 120, 120, 120], 
-    index: int = 0,
+    ckpt: Optional[str] = './checkpoint/vtoonify_d_cartoon/vtoonify_s299_d0.5.pt',
     vtoonify: Optional[VToonify] = None,
     parsingpredictor: Optional[BiSeNet] = None,
     pspencoder: Optional[GradualStyleEncoder] = None,
     exstyle = None,
 ):
-    ckpt = './checkpoint/vtoonify_d_cartoon/vtoonify_s299_d0.5.pt'
     if vtoonify is None:
+        if ckpt is None:
+            print('at least one of ckpt and vtoonify model should not be None!')
+            exit(1)
         vtoonify = VToonify(backbone = 'dualstylegan')
         vtoonify.load_state_dict(torch.load(ckpt, map_location=lambda storage, loc: storage)['g_ema'])
     vtoonify.to(device)
@@ -94,9 +97,12 @@ def image_style_transfer_cartoon299(
         pspencoder = load_psp_standalone('./checkpoint/encoder.pt', device)    
 
     if exstyle is None:
+        if ckpt is None:
+            print('at least one of ckpt and exstyle should not be None!')
+            exit(1)
         exstyle_path = os.path.join(os.path.dirname(ckpt), 'exstyle_code.npy')
         exstyles = np.load(exstyle_path, allow_pickle='TRUE').item()
-        stylename = list(exstyles.keys())[299]
+        stylename = list(exstyles.keys())[style_id]
         exstyle = torch.tensor(exstyles[stylename]).to(device)
         with torch.no_grad():  
             exstyle = vtoonify.zplus2wplus(exstyle)
@@ -116,6 +122,7 @@ def image_style_transfer_cartoon299(
         h,w,top,bottom,left,right,scale = paras
         kernel_1d = np.array([[0.125],[0.375],[0.375],[0.125]])
         # for HR image, we apply gaussian blur to it to avoid over-sharp stylization results
+        print("scale = ", scale)
         if scale <= 0.75:
             frame = cv2.sepFilter2D(frame, -1, kernel_1d, kernel_1d)
         if scale <= 0.375:
@@ -155,6 +162,12 @@ def image_style_transfer_cartoon299(
         weight_kernel = (creat_weight_kernel((right - left, bottom - top)))[..., np.newaxis]
         origin[top:bottom, left:right] = output * weight_kernel + origin[top:bottom, left:right] * (1 - weight_kernel)
         origin = (origin * 255).astype(np.uint8)
+
+        save_dir = '~/Pictures/test2333'
+        if os.path.exists(save_dir):
+            t = time.time()
+            cv2.imwrite(save_dir + '/{}_vt_d.jpg'.format(t), (output * 255).astype(np.uint8)[..., [2, 1, 0]])
+            cv2.imwrite(save_dir + '/{}_blend.jpg'.format(t), origin[..., [2, 1, 0]])
 
         return origin
 

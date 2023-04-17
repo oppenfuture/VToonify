@@ -1,0 +1,6 @@
+{
+    "ckpt": "vtoonify_d_cartoon_test",
+    "style_id": 100,
+    "device": "cuda",
+    "padding": 200
+}
