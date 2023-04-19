@@ -34,3 +34,8 @@ dependencies:
     - scipy==1.7.0 
     - tqdm==4.61.2
     - wget==3.2
+    - flask==2.2.3
+    - flask_cors==3.0.10
+    - mediapipe==0.9.2.1
+    - onnxruntime-gpu==1.14.1
+    - pooch==1.7.0

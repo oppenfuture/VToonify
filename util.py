@@ -11,7 +11,7 @@ from torch.nn import functional as F
 from torch import autograd
 from torch.nn import init
 import torchvision.transforms as transforms
-from model.stylegan.op import conv2d_gradfix
+from model.stylegan.op_cpu import conv2d_gradfix
 from model.encoder.encoders.psp_encoders import GradualStyleEncoder
 from model.encoder.align_all_parallel import get_landmark
     
@@ -187,6 +187,58 @@ def get_video_crop_parameter(filepath, predictor, padding=[200,200,200,200]):
     bottom = min(round(center[1] + padding[3]), h) // 8 * 8
     return h,w,top,bottom,left,right,scale
 
+def get_crop_parameter_by_mediapipe(img, padding=[200, 200, 200, 200]):
+    import mediapipe.python.solutions.face_detection as mp_face
+    faceDetection = mp_face.FaceDetection(min_detection_confidence=0.5)
+    results = faceDetection.process(img)
+    if results.detections:
+        keypoints = results.detections[0].location_data.relative_keypoints
+
+        lm_eye_left = np.array([keypoints[0].x * img.shape[1], keypoints[0].y * img.shape[0]])
+        lm_eye_right = np.array([keypoints[1].x * img.shape[1], keypoints[1].y * img.shape[0]])
+        center_before_scale = 0.5 * (lm_eye_left + lm_eye_right)
+        H, W, _ = img.shape
+        scale = 64. / (lm_eye_right[0] - lm_eye_left[0])
+        left = max(round(center_before_scale[0] - padding[0] // scale), 0)
+        right = min(round(center_before_scale[0] + padding[1] // scale), W)
+        top = max(round(center_before_scale[1] - padding[2] // scale), 0)
+        bottom = min(round(center_before_scale[1] + padding[3] // scale), H)
+        w = int(scale * (right - left) // 8 * 8)
+        h = int(scale * (bottom - top) // 8 * 8)
+        return h,w,top,bottom,left,right,scale
+    else:
+        return None
+
+def creat_weight_kernel(kernel_size=(3, 3), a=0.8, b = 1.0, k=1):
+    # if sigma == 0:
+    #     sigma = ((kernel_size - 1) * 0.5 - 1) * 0.3 + 0.8
+    X = np.linspace(-k, k, kernel_size[0])
+    Y = np.linspace(-k, k, kernel_size[1])
+    x, y = np.meshgrid(X, Y)
+    x0 = 0
+    y0 = 0
+    # kernel = 1/(2*np.pi*sigma**2) * np.exp(- ((x -x0)**2 + (y - y0)**2)/ (2 * sigma**2))
+
+    distance = np.where(np.abs(x - x0) > np.abs(y - y0), np.abs(x - x0), np.abs(y - y0))    # from 0 to 1
+
+    kernel = np.where(distance > a, (b - distance) / (b - a), 1)
+    kernel = np.where(kernel < 0, 0, kernel)
+
+    # kernel = (1 - distance) ** 1.5
+    # kernel = (kernel - kernel.min()) / kernel.max()
+
+    return kernel
+
+def create_weight_field(mask: np.ndarray, kernel_size=(3, 3), iterations: int=10, a: float=2):
+    origin = mask.copy()
+    if origin.max() > 1:
+        origin = origin / 255.
+
+    temp = origin
+    for _ in range(iterations):
+        temp = (cv2.erode(temp, np.ones(kernel_size)) + temp) / 2
+    return temp / temp.max()
+
 def tensor2cv2(img):
     tmp = ((img.cpu().numpy().transpose(1, 2, 0) + 1.0) * 127.5).astype(np.uint8)
     return cv2.cvtColor(tmp, cv2.COLOR_RGB2BGR)
@@ -227,3 +279,12 @@ def blend_models(G_low, G_high, weight=[1]*7+[0]*11):
         
     return state_dict
 
+# for flask server
+def decode_received_image_data(img_data):
+  data = np.frombuffer(img_data, np.uint8)
+  img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+  return img
+
+def encode_image_to_bytes(fmt, image):
+  _, encoded_image = cv2.imencode(fmt, np.asarray(image))
+  return encoded_image.tobytes()
